@@ -1,6 +1,7 @@
 
 ```R
 
+
 # ================================================================================
 # [Machine Learning Predictive Model: NOAF after CABG]
 # ================================================================================
@@ -216,6 +217,7 @@ cat("Feature selection summary exported.\nStep 4 complete.\n\n")
 cat("========== Step 5: Cross-Validation Setup ==========\n")
 
 set.seed()#set the random seeds
+# The `trainControl` parameter remains unchanged; the class weights are passed in through the `weights` parameter of `train()`.
 cv_control <- trainControl(
   method          = "repeatedcv",
   number          = 5,     # 5-fold
@@ -245,27 +247,54 @@ model_settings <- data.frame(
     "svmRadial", "xgbTree", "nb",
     "AdaBoost.M1", "nnet"
   ),
-
   NeedsScaling = c(
-    TRUE,   # Lasso            
-    TRUE,   # DiscriminantModel 
-    FALSE,  # LogisticModel    
-    TRUE,   # SVM_RBF          
-    FALSE,  # GradientBoosting 
-    FALSE,  # NaiveBayes       
-    FALSE,  # AdaptiveBoosting  
-    TRUE    # NeuralNet       
+    TRUE,   # Lasso
+    TRUE,   # DiscriminantModel
+    FALSE,  # LogisticModel
+    TRUE,   # SVM_RBF
+    FALSE,  # GradientBoosting
+    FALSE,  # NaiveBayes
+    FALSE,  # AdaptiveBoosting
+    TRUE    # NeuralNet
   ),
   stringsAsFactors = FALSE
 )
 
-training_times <- numeric()
-modelContainer <- list()
-model_formula  <- as.formula(paste(response_var, "~ ."))
+# ── Class Weight Calculation ──────────────────────────────────────────────────
+# [L5] Inverse-frequency weighting, computed on TRAINING SET ONLY.
+#      Ensures minority class (yes/NOAF) receives proportionally higher weight.
+#      Weights are row-level vectors passed into caret::train().
+#      Validation set (test_data) is never involved — no leakage.
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Remove Patient_ID — identifier, not a predictor
 train_data_model <- train_data %>% select(-all_of(patient_id_col))
 test_data_model  <- test_data  %>% select(-all_of(patient_id_col))
+
+outcome_table <- table(train_data_model[[response_var]])
+class_weights <- (1 / outcome_table) / sum(1 / outcome_table) * length(train_data_model[[response_var]])
+
+sample_weights <- ifelse(
+  train_data_model[[response_var]] == "yes",
+  class_weights["yes"],
+  class_weights["no"]
+)
+
+cat(sprintf(
+  "Class weights → no: %.4f | yes: %.4f  (ratio 1:%.2f)\n\n",
+  class_weights["no"], class_weights["yes"],
+  class_weights["yes"] / class_weights["no"]
+))
+
+# Methods that do NOT support external weights:
+#   - nb        : silently ignores weights
+#   - AdaBoost.M1 : has its own internal sample re-weighting mechanism;
+#                   passing external weights may conflict with that logic
+no_weight_methods <- c("nb", "AdaBoost.M1")
+
+training_times <- numeric()
+modelContainer <- list()
+model_formula  <- as.formula(paste(response_var, "~ ."))
 
 total_start <- Sys.time()
 cat("Training started:", format(total_start, "%Y-%m-%d %H:%M:%S"), "\n")
@@ -274,12 +303,14 @@ for (idx in seq_len(nrow(model_settings))) {
   algoName   <- model_settings$AlgorithmName[idx]
   algoImpl   <- model_settings$Implementation[idx]
   needsScale <- model_settings$NeedsScaling[idx]
+  useWeights <- !(algoImpl %in% no_weight_methods)
   start_time <- Sys.time()
 
   cat(sprintf(
-    "\n[%d/%d] %-20s (%s) | Scale: %s | %s\n",
+    "\n[%d/%d] %-20s (%s) | Scale: %s | Weights: %s | %s\n",
     idx, nrow(model_settings), algoName, algoImpl,
     ifelse(needsScale, "YES — center+scale inside each fold [L4]", "NO"),
+    ifelse(useWeights, "YES [L5]", "NO — method incompatible"),
     format(start_time, "%H:%M:%S")
   ))
 
@@ -293,7 +324,8 @@ for (idx in seq_len(nrow(model_settings))) {
       method     = algoImpl,
       metric     = "ROC",
       trControl  = cv_control,
-      preProcess = preproc_steps   # [L4] fold-internal standardization
+      preProcess = preproc_steps,                                  # [L4] fold-internal standardization
+      weights    = if (useWeights) sample_weights else NULL        # [L5] class imbalance correction
     )
     modelContainer[[algoName]] <- model
     training_times[algoName]   <- as.numeric(
@@ -328,5 +360,6 @@ saveRDS(model_settings,   "model_settings.rds")
 cat("Model objects saved: modelContainer.rds / test_data_model.rds / model_settings.rds\n\n")
 
 cat("\nReady for downstream evaluation.\n")
+
 
 ```
